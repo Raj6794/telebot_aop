@@ -40,7 +40,7 @@ ALLOWED_CHAT_IDS: set[int] = (
     if ALLOWED_CHAT_IDS_RAW else set()
 )
 
-MIN_RUNTIME_SECONDS = 10 * 60       # 10 minutes
+MIN_RUNTIME_SECONDS = 20 * 60       # 10 minutes
 SEGMENT_SIZE       = 1_900 * 1024**2 # 1.9 GB
 VIDEO_EXTS         = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts", ".m4v", ".wmv"}
 SPLIT_DIR          = Path("/tmp/tgbot_splits")
