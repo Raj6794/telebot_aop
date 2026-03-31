@@ -49,9 +49,9 @@ jobs:
           docker run -d \
             -p 8081:8081 \
             --name telegram-api \
-            aiogram/telegram-bot-api \
-            --api-id=$TELEGRAM_API_ID \
-            --api-hash=$TELEGRAM_API_HASH
+            -e TELEGRAM_API_ID=$TELEGRAM_API_ID \
+            -e TELEGRAM_API_HASH=$TELEGRAM_API_HASH \
+            aiogram/telegram-bot-api
   
       # ⏳ Wait until server is reachable
       - name: Wait for API server
