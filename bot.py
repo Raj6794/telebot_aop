@@ -243,14 +243,13 @@ async def shutdown_watchdog(app: Application):
 
 def main():
     app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .read_timeout(30)
-        .write_timeout(60)
-        .connect_timeout(30)
-        .pool_timeout(30)
-        .build()
-    )
+    Application.builder()
+    .token(BOT_TOKEN)
+    .base_url("http://127.0.0.1:8081/bot")   # ← point to local server
+    .base_file_url("http://127.0.0.1:8081/file/bot")  # ← for file downloads
+    .local_mode(True)                          # ← disables cloud size checks
+    .build()
+)
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("ping", cmd_ping))
