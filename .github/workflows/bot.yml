@@ -89,15 +89,20 @@ jobs:
           TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
         run: |
+          # Create the working directory FIRST
           mkdir -p /tmp/tgbotapi-data
-          ~/tgbotapi/telegram-bot-api \
+          mkdir -p /tmp/tgbotapi-temp
+      
+          $TGBOTAPI_BIN \
             --api-id="$TELEGRAM_API_ID" \
             --api-hash="$TELEGRAM_API_HASH" \
             --local \
             --http-port=8081 \
             --dir=/tmp/tgbotapi-data \
-            --log=/tmp/tgbotapi.log &
-
+            --temp-dir=/tmp/tgbotapi-temp \
+            --log=/tmp/tgbotapi.log \
+            --verbosity=1 &
+      
           echo "Waiting for Local Bot API Server..."
           for i in $(seq 1 40); do
             if curl -sf http://127.0.0.1:8081 > /dev/null 2>&1; then
