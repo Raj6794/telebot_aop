@@ -40,78 +40,43 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg p7zip-full
 
-      # ── 4. Cache the compiled Local Bot API Server binary ────────────────────
-      #    Cache key is based on the upstream CMakeLists.txt so it rebuilds
-      #    automatically only when the upstream source changes.
-      - name: Cache Local Bot API Server binary
-        id: cache-tgbotapi
-        uses: actions/cache@v4
-        with:
-          path: ~/tgbotapi/telegram-bot-api
-          key: tgbotapi-${{ runner.os }}-v1
-
-      # ── 5. Install build tools (only on cache miss) ──────────────────────────
-      - name: Install build dependencies
-        if: steps.cache-tgbotapi.outputs.cache-hit != 'true'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y \
-            build-essential \
-            cmake \
-            zlib1g-dev \
-            libssl-dev \
-            gperf
-
-      # ── 6. Clone and build (only on cache miss) ──────────────────────────────
-      - name: Clone Telegram Bot API Server source
-        if: steps.cache-tgbotapi.outputs.cache-hit != 'true'
-        run: |
-          git clone --recursive \
-            https://github.com/tdlib/telegram-bot-api.git \
-            ~/tgbotapi-src
-
-      - name: Build Telegram Bot API Server
-        if: steps.cache-tgbotapi.outputs.cache-hit != 'true'
-        run: |
-          cd ~/tgbotapi-src
-          mkdir build && cd build
-          cmake -DCMAKE_BUILD_TYPE=Release ..
-          cmake --build . --target telegram-bot-api -j$(nproc)
-          # Copy binary to cache directory
-          mkdir -p ~/tgbotapi
-          cp telegram-bot-api ~/tgbotapi/telegram-bot-api
-          echo "✅ Build complete"
-
-      # ── 7. Start Local Bot API Server ────────────────────────────────────────
-      #    Runs in background. Lifts upload limit from 50 MB → 2 GB.
-      - name: Start Local Bot API Server
+      # ── 4. Start Telegram API server with STEP-LEVEL env ────────────────────
+      - name: Start Telegram Bot API server
         env:
           TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
         run: |
-          # Create the working directory FIRST
-          mkdir -p /tmp/tgbotapi-data
-          mkdir -p /tmp/tgbotapi-temp
-      
-          $TGBOTAPI_BIN \
-            --api-id="$TELEGRAM_API_ID" \
-            --api-hash="$TELEGRAM_API_HASH" \
-            --local \
-            --http-port=8081 \
-            --dir=/tmp/tgbotapi-data \
-            --temp-dir=/tmp/tgbotapi-temp \
-            --log=/tmp/tgbotapi.log \
-            --verbosity=1 &
-      
-          echo "Waiting for Local Bot API Server..."
-          for i in $(seq 1 40); do
-            if curl -sf http://127.0.0.1:8081 > /dev/null 2>&1; then
-              echo "✅ Server ready (attempt $i)"
+          docker run -d \
+            -p 8081:8081 \
+            --name telegram-api \
+            aiogram/telegram-bot-api \
+            --api-id=$TELEGRAM_API_ID \
+            --api-hash=$TELEGRAM_API_HASH
+  
+      # ⏳ Wait until server is reachable
+      - name: Wait for API server
+        run: |
+          echo "Waiting for Telegram API server..."
+          for i in {1..40}; do
+            if curl -s http://127.0.0.1:8081 >/dev/null; then
+              echo "✅ API server is reachable"
               break
             fi
-            echo "  attempt $i/40 — waiting 3s..."
-            sleep 3
+            echo "⏳ Attempt $i..."
+            sleep 2
           done
+  
+          echo "===== LAST LOGS ====="
+          docker logs telegram-api | tail -n 50
+  
+      # ❌ Fail early if server still not working
+      - name: Verify API server
+        run: |
+          if ! curl -s http://127.0.0.1:8081 >/dev/null; then
+            echo "❌ API server failed to start"
+            docker logs telegram-api
+            exit 1
+          fi
 
       # ── 8. Run the bot ───────────────────────────────────────────────────────
       #    Runs until: min 10 min elapsed + no active tasks
