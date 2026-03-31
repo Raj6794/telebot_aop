@@ -3,10 +3,12 @@ downloadAT.py — Handles all downloading logic
 Called by bot.py with a URL, saves to a temp directory, reports progress via callback.
 """
 
+
 import asyncio
 import logging
 import os
 import time
+import re
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -23,107 +25,197 @@ async def download_file(
     progress_callback: Optional[Callable[[int, int, float], None]] = None,
     custom_filename: Optional[str] = None,
 ) -> Path:
-    """
-    Download a file from URL to DOWNLOAD_DIR.
-    
-    Args:
-        url: Direct download URL
-        progress_callback: Called with (downloaded_bytes, total_bytes, speed_mbps)
-        custom_filename: Override the filename detected from URL/headers
-    
-    Returns:
-        Path to the downloaded file
-    
-    Raises:
-        ValueError: If file too large or URL invalid
-        httpx.HTTPError: On network errors
-    """
-    MAX_SIZE = 50 * 1024 ** 3  # 50 GB hard cap
 
-    async with httpx.AsyncClient(
-        follow_redirects=True,
-        timeout=httpx.Timeout(connect=30, read=300, write=300, pool=30),
-    ) as client:
+    MAX_SIZE = 50 * 1024 ** 3
 
-        # HEAD request first to get filename + size
+    async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+
+        # ===== HEAD request =====
         try:
             head = await client.head(url)
             head.raise_for_status()
         except Exception:
-            # Some servers don't support HEAD — fall through
             head = None
 
-        # Determine filename
+        # ===== Filename logic (UNCHANGED) =====
         filename = custom_filename
         if not filename and head:
             cd = head.headers.get("content-disposition", "")
             if "filename=" in cd:
                 filename = cd.split("filename=")[-1].strip().strip('"').strip("'")
+
         if not filename:
             filename = url.split("?")[0].rstrip("/").split("/")[-1]
+
         if not filename:
             filename = f"download_{int(time.time())}"
 
-        # Sanitize filename
         filename = "".join(c for c in filename if c not in r'\/:*?"<>|').strip()
 
         dest = DOWNLOAD_DIR / filename
-        # Avoid overwriting
+
         if dest.exists():
-            stem = dest.stem
-            suffix = dest.suffix
-            dest = DOWNLOAD_DIR / f"{stem}_{int(time.time())}{suffix}"
+            dest = DOWNLOAD_DIR / f"{dest.stem}_{int(time.time())}{dest.suffix}"
 
-        # Stream download
-        downloaded = 0
-        total = 0
-        start_time = time.monotonic()
+        # ===== ROUTING =====
+        if ".m3u8" in url:
+            return await _download_m3u8(url, dest, progress_callback)
 
-        async with client.stream("GET", url) as resp:
-            resp.raise_for_status()
-            total = int(resp.headers.get("content-length", 0))
+        if url.startswith("magnet:") or url.endswith(".torrent"):
+            return await _download_torrent(url, progress_callback)
 
-            if total > MAX_SIZE:
-                raise ValueError(
-                    f"File too large: {total / 1024**3:.2f} GB exceeds 50 GB limit"
-                )
-
-            with open(dest, "wb") as f:
-                async for chunk in resp.aiter_bytes(chunk_size=1024 * 1024):  # 1 MB chunks
-                    f.write(chunk)
-                    downloaded += len(chunk)
-
-                    if progress_callback and total:
-                        elapsed = time.monotonic() - start_time
-                        speed = (downloaded / elapsed) / 1024**2 if elapsed > 0 else 0
-                        await asyncio.get_event_loop().run_in_executor(
-                            None, lambda: None  # yield control
-                        )
-                        try:
-                            await progress_callback(downloaded, total, speed)
-                        except Exception:
-                            pass  # never crash on callback error
-
-        logger.info(f"Downloaded: {dest} ({downloaded / 1024**2:.1f} MB)")
-        return dest
+        return await _download_aria2(url, dest, progress_callback)
 
 
-def cleanup_file(path: Path):
-    """Delete a downloaded/processed file."""
-    try:
-        if path.exists():
-            path.unlink()
-            logger.info(f"Cleaned up: {path}")
-    except Exception as e:
-        logger.warning(f"Cleanup failed for {path}: {e}")
+# ==========================================
+# ⚡ ARIA2 WITH REAL-TIME PROGRESS
+# ==========================================
+async def _download_aria2(url: str, dest: Path, cb):
+
+    cmd = [
+        "aria2c",
+        "-x", "16",
+        "-s", "16",
+        "-k", "1M",
+        "--file-allocation=none",
+        "--summary-interval=1",
+        "--dir", str(dest.parent),
+        "--out", dest.name,
+        url,
+    ]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+
+    pattern = re.compile(
+        r"\[#\w+\s+([\d.]+)%.*?DL:([\d.]+)([KMG])iB/s.*?ETA:(\d+s)?"
+    )
+
+    while True:
+        line = await proc.stdout.readline()
+        if not line:
+            break
+
+        text = line.decode().strip()
+
+        if cb:
+            match = pattern.search(text)
+            if match:
+                percent = float(match.group(1))
+                speed_val = float(match.group(2))
+                unit = match.group(3)
+
+                # convert speed to MB/s
+                mult = {"K": 1/1024, "M": 1, "G": 1024}
+                speed = speed_val * mult.get(unit, 1)
+
+                # fake total for percentage
+                total = 100
+                downloaded = percent
+
+                try:
+                    await cb(downloaded, total, speed)
+                except:
+                    pass
+
+    await proc.wait()
+    return dest
 
 
-def cleanup_dir(directory: Path):
-    """Delete a directory and all its contents."""
-    import shutil
-    try:
-        if directory.exists():
-            shutil.rmtree(directory)
-            logger.info(f"Cleaned up dir: {directory}")
-    except Exception as e:
-        logger.warning(f"Dir cleanup failed for {directory}: {e}")
+# ==========================================
+# 🎬 YT-DLP (M3U8) PROGRESS
+# ==========================================
+async def _download_m3u8(url: str, dest: Path, cb):
+
+    cmd = [
+        "yt-dlp",
+        "-o", str(dest),
+        "--concurrent-fragments", "16",
+        "--newline",
+        url,
+    ]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+
+    pattern = re.compile(r"\[download\]\s+([\d.]+)%.*?at\s+([\d.]+)([KMG])iB/s")
+
+    while True:
+        line = await proc.stdout.readline()
+        if not line:
+            break
+
+        text = line.decode()
+
+        if cb:
+            match = pattern.search(text)
+            if match:
+                percent = float(match.group(1))
+                speed_val = float(match.group(2))
+                unit = match.group(3)
+
+                mult = {"K": 1/1024, "M": 1, "G": 1024}
+                speed = speed_val * mult.get(unit, 1)
+
+                try:
+                    await cb(percent, 100, speed)
+                except:
+                    pass
+
+    await proc.wait()
+    return dest
+
+
+# ==========================================
+# 🧲 TORRENT PROGRESS (ARIA2)
+# ==========================================
+async def _download_torrent(url: str, cb):
+
+    cmd = [
+        "aria2c",
+        "--enable-dht=true",
+        "--enable-peer-exchange=true",
+        "--summary-interval=1",
+        "--seed-time=0",
+        "--dir", str(DOWNLOAD_DIR),
+        url,
+    ]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+
+    pattern = re.compile(r"([\d.]+)%.*DL:([\d.]+)([KMG])iB/s")
+
+    while True:
+        line = await proc.stdout.readline()
+        if not line:
+            break
+
+        text = line.decode()
+
+        if cb:
+            match = pattern.search(text)
+            if match:
+                percent = float(match.group(1))
+                speed_val = float(match.group(2))
+                unit = match.group(3)
+
+                mult = {"K": 1/1024, "M": 1, "G": 1024}
+                speed = speed_val * mult.get(unit, 1)
+
+                try:
+                    await cb(percent, 100, speed)
+                except:
+                    pass
+
+    await proc.wait()
+    return DOWNLOAD_DIR
