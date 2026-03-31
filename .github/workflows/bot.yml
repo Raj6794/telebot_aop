@@ -1,68 +1,67 @@
 name: Telegram Bot Runner
- 
+
 on:
-  # Trigger manually from GitHub Actions UI
   workflow_dispatch:
- 
-  # OR schedule: runs every 10 minutes to ensure coverage
-  # Uncomment below to auto-start on schedule
   # schedule:
   #   - cron: '*/10 * * * *'
- 
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # GitHub Actions max = 6 hours per job
- 
+    timeout-minutes: 360
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
- 
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
- 
-      - name: Cache pip dependencies
+
+      - name: Install system tools (ffmpeg, 7z, build tools)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg p7zip-full \
+            build-essential cmake zlib1g-dev libssl-dev gperf
+
+      - name: Cache pip
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
- 
-      - name: Install dependencies
+
+      - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-
-      - name: Install dependencies for Local Bot API Server
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake \
-            zlib1g-dev libssl-dev gperf
-
-      - name: Build & Start Telegram Local Bot API Server
-        env:
-          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
-          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+      - name: Build Telegram Local Bot API Server
         run: |
           git clone --recursive https://github.com/tdlib/telegram-bot-api.git
           cd telegram-bot-api
           mkdir build && cd build
           cmake -DCMAKE_BUILD_TYPE=Release ..
-          cmake --build . --target telegram-bot-api
-          # Start server in background
-          ./telegram-bot-api \
+          cmake --build . --target telegram-bot-api -j$(nproc)
+          echo "Build complete"
+
+      - name: Start Local Bot API Server
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        run: |
+          ./telegram-bot-api/build/telegram-bot-api \
             --api-id=$TELEGRAM_API_ID \
             --api-hash=$TELEGRAM_API_HASH \
             --local \
-            --http-port=8081 &
-          # Wait for it to be ready
-          sleep 5
-          echo "Local Bot API server started"
+            --http-port=8081 \
+            --dir=/tmp/telegram-bot-api-data &
+          # Wait until server is accepting connections
+          for i in $(seq 1 30); do
+            curl -s http://127.0.0.1:8081 && echo "Server ready" && break
+            sleep 2
+          done
 
-      - name: Run Telegram Bot (min 10 min, waits for tasks)
+      - name: Run Telegram Bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          ALLOWED_USER_IDS: ${{ secrets.ALLOWED_USER_IDS }}   # comma-separated, e.g. "123456,789012"
+          ALLOWED_USER_IDS: ${{ secrets.ALLOWED_USER_IDS }}
         run: python bot.py
