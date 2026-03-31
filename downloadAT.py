@@ -219,3 +219,23 @@ async def _download_torrent(url: str, cb):
 
     await proc.wait()
     return DOWNLOAD_DIR
+
+def cleanup_file(path: Path):
+    """Delete a downloaded/processed file."""
+    try:
+        if path.exists():
+            path.unlink()
+            logger.info(f"Cleaned up: {path}")
+    except Exception as e:
+        logger.warning(f"Cleanup failed for {path}: {e}")
+
+
+def cleanup_dir(directory: Path):
+    """Delete a directory and all its contents."""
+    import shutil
+    try:
+        if directory.exists():
+            shutil.rmtree(directory)
+            logger.info(f"Cleaned up dir: {directory}")
+    except Exception as e:
+        logger.warning(f"Dir cleanup failed for {directory}: {e}")
